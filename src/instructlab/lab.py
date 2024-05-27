@@ -27,6 +27,8 @@ import yaml
 from . import config, utils
 from .sysinfo import get_sysinfo
 
+from icecream import ic
+
 # 'fork' is unsafe and incompatible with some hardware accelerators.
 # Python 3.14 will switch to 'spawn' on all platforms.
 multiprocessing.set_start_method(
@@ -48,7 +50,7 @@ class Lab:
     def __init__(self, config_obj: config.Config):
         self.config = config_obj
         FORMAT = "%(levelname)s %(asctime)s %(filename)s:%(lineno)d %(message)s"
-        logging.basicConfig(format=FORMAT)
+        logging.basicConfig(format=FORMAT, level=logging.INFO)
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(self.config.general.log_level.upper())
 
@@ -487,7 +489,7 @@ def generate(
 
     server_process = None
     server_queue = None
-    logger = logging.getLogger("TODO")
+    logger = logging.getLogger(__name__)
     prompt_file_path = config.DEFAULT_PROMPT_FILE
     if ctx.obj is not None:
         logger = ctx.obj.logger

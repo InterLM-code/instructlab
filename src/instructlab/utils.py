@@ -22,6 +22,7 @@ import click
 import git
 import gitdb
 import yaml
+from icecream import ic
 
 # Local
 from . import common
@@ -136,13 +137,23 @@ TAXONOMY_FOLDERS: List[str] = ["compositional_skills", "knowledge"]
 
 def istaxonomyfile(fn):
     path = Path(fn)
-    if path.suffix == ".yaml" and path.parts[0] in TAXONOMY_FOLDERS:
+    # if path.suffix == ".yaml" and path.parts[0] in TAXONOMY_FOLDERS:
+    if path.suffix == ".yaml":
         return True
     return False
 
 
 def get_taxonomy_diff(repo="taxonomy", base="origin/main"):
-    repo = git.Repo(repo)
+
+    try:    
+        repo = git.Repo(repo)
+    except git.exc.InvalidGitRepositoryError as e:
+    # if the path is a dir but not a repo then we return all the file
+        assert os.path.isdir(repo)
+        # list all the files in the directory recursively
+        untracked_files = [str(f) for f in Path(repo).rglob("*") if istaxonomyfile(f)]
+        return untracked_files
+
     untracked_files = [u for u in repo.untracked_files if istaxonomyfile(u)]
 
     branches = [b.name for b in repo.branches]
@@ -203,6 +214,21 @@ def get_documents(
     Returns:
          List[str]: List of document contents.
     """ ""
+    if "root_path" in source:
+        root_path = source["root_path"]
+        if not os.path.isdir(root_path):
+            raise SystemExit(f"Directory {root_path} does not exist.")
+        file_patterns = source.get("patterns")
+        file_contents = []
+        for pattern in file_patterns:
+            for file_path in glob.glob(os.path.join(root_path, pattern)):
+                if os.path.isfile(file_path) and (file_path.endswith(".md") or file_path.endswith(".txt")):
+                    with open(file_path, "r", encoding="utf-8") as file:
+                        file_contents.append(file.read())
+        if file_contents:
+            return file_contents
+        raise SystemExit("Couldn't find any files to process.")
+    
     repo_url = source.get("repo")
     commit_hash = source.get("commit")
     file_patterns = source.get("patterns")
@@ -277,6 +303,36 @@ def chunk_document(documents: List, server_ctx_size, chunk_word_count) -> List[s
         temp = text_splitter.create_documents([docs])
         content.extend([item.page_content for item in temp])
 
+    return content
+
+
+def tokenize(text: str, model_name: str, max_length: int=-1) -> List[str]:
+    """
+    Tokenizes the text using the tokenizer of the specified model.
+    Args:
+        text (str): Text to be tokenized.
+        model_name (str): Name of the model to be used for tokenization.
+        max_length (int): Maximum length of the tokenized text.
+    Returns:
+        List[str]: List of tokenized text.
+    """
+    from transformers import AutoTokenizer
+
+    # Initialize the tokenizer with a pretrained model
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    # Tokenize the text
+    tokens = tokenizer.encode(text, add_special_tokens=False, 
+                              max_length=max_length if max_length > 0 else None,
+                              truncation=True if max_length > 0 else False)
+    return tokenizer.decode(tokens)
+
+
+def chunk_document_by_tokens(documents: List, server_ctx_size, model_name) -> List[str]:
+    content = []
+    for doc in documents:
+        # Only keep the first `server_ctx_size` tokens
+        chunk = tokenize(doc, model_name, server_ctx_size - 1024)
+        content.append(chunk)
     return content
 
 
@@ -424,6 +480,7 @@ def read_taxonomy_file(
             break
     else:
         taxonomy_path = file_path
+
     # read file if extension is correct
     try:
         with open(file_path, "r", encoding="utf-8") as file:
@@ -439,60 +496,60 @@ def read_taxonomy_file(
             errors += 1
             return None, warnings, errors
 
-        # do general YAML linting if specified
-        version = get_version(contents)
-        if version > 1:  # no linting for version 1 yaml
-            if yaml_rules is not None:
-                is_file = os.path.isfile(yaml_rules)
-                if is_file:
-                    logger.debug(f"Using YAML rules from {yaml_rules}")
-                    yamllint_cmd = [
-                        "yamllint",
-                        "-f",
-                        "parsable",
-                        "-c",
-                        yaml_rules,
-                        file_path,
-                        "-s",
-                    ]
-                else:
-                    logger.debug(f"Cannot find {yaml_rules}. Using default rules.")
-                    yamllint_cmd = [
-                        "yamllint",
-                        "-f",
-                        "parsable",
-                        "-d",
-                        DEFAULT_YAML_RULES,
-                        file_path,
-                        "-s",
-                    ]
-            else:
-                yamllint_cmd = [
-                    "yamllint",
-                    "-f",
-                    "parsable",
-                    "-d",
-                    DEFAULT_YAML_RULES,
-                    file_path,
-                    "-s",
-                ]
-            try:
-                subprocess.check_output(yamllint_cmd, text=True)
-            except subprocess.SubprocessError as e:
-                lint_messages = [f"Problems found in file {file_path}"]
-                parsed_output = e.output.splitlines()
-                for p in parsed_output:
-                    errors += 1
-                    delim = str(file_path) + ":"
-                    parsed_p = p.split(delim)[1]
-                    lint_messages.append(parsed_p)
-                logger.error("\n".join(lint_messages))
-                return None, warnings, errors
+        # # do general YAML linting if specified
+        # version = get_version(contents)
+        # if version > 1:  # no linting for version 1 yaml
+        #     if yaml_rules is not None:
+        #         is_file = os.path.isfile(yaml_rules)
+        #         if is_file:
+        #             logger.debug(f"Using YAML rules from {yaml_rules}")
+        #             yamllint_cmd = [
+        #                 "yamllint",
+        #                 "-f",
+        #                 "parsable",
+        #                 "-c",
+        #                 yaml_rules,
+        #                 file_path,
+        #                 "-s",
+        #             ]
+        #         else:
+        #             logger.debug(f"Cannot find {yaml_rules}. Using default rules.")
+        #             yamllint_cmd = [
+        #                 "yamllint",
+        #                 "-f",
+        #                 "parsable",
+        #                 "-d",
+        #                 DEFAULT_YAML_RULES,
+        #                 file_path,
+        #                 "-s",
+        #             ]
+        #     else:
+        #         yamllint_cmd = [
+        #             "yamllint",
+        #             "-f",
+        #             "parsable",
+        #             "-d",
+        #             DEFAULT_YAML_RULES,
+        #             file_path,
+        #             "-s",
+        #         ]
+        #     try:
+        #         subprocess.check_output(yamllint_cmd, text=True)
+        #     except subprocess.SubprocessError as e:
+        #         lint_messages = [f"Problems found in file {file_path}"]
+        #         parsed_output = e.output.splitlines()
+        #         for p in parsed_output:
+        #             errors += 1
+        #             delim = str(file_path) + ":"
+        #             parsed_p = p.split(delim)[1]
+        #             lint_messages.append(parsed_p)
+        #         logger.error("\n".join(lint_messages))
+        #         return None, warnings, errors
 
-        validation_errors = validate_yaml(logger, contents, taxonomy_path)
-        if validation_errors:
-            errors += validation_errors
-            return None, warnings, errors
+        # validation_errors = validate_yaml(logger, contents, taxonomy_path)
+        # if validation_errors:
+        #     errors += validation_errors
+        #     return None, warnings, errors
 
         # get seed instruction data
         tax_path = "->".join(taxonomy_path.parent.parts)

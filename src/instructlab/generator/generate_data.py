@@ -21,9 +21,10 @@ import tqdm
 
 # Local
 from ..config import DEFAULT_MULTIPROCESSING_START_METHOD
-from ..utils import chunk_document, read_taxonomy
+from ..utils import chunk_document, read_taxonomy, chunk_document_by_tokens, tokenize
 from . import utils
 from .utils import GenerateException
+from icecream import ic
 
 DEFAULT_PROMPT_TEMPLATE_MERLINITE = """\
 You are asked to come up with a set of 5 diverse task instructions under {{taxonomy}}{{" for the task \\"%s\\""|format(task_description)  if task_description}}. These task instructions will be given to a GPT model and we will evaluate the GPT model for completing the instructions.
@@ -113,6 +114,8 @@ _WORD_DENYLIST = [
 
 def check_prompt_file(prompt_file_path, model_family):
     """Check for prompt file."""
+    ic(prompt_file_path, model_family)
+    # exit()
     try:
         with open(prompt_file_path, encoding="utf=8") as file:
             prompt_template = file.read()
@@ -273,6 +276,23 @@ def get_instructions_from_model(
     tls_client_key,
     tls_client_passwd,
 ):
+    # ic(request_idx)
+    # ic(instruction_data_pool)
+    # ic(prompt_template)
+    # ic(api_base)
+    # ic(api_key)
+    # ic(model_name)
+    # ic(num_prompt_instructions)
+    # ic(request_batch_size)
+    # ic(temperature)
+    # ic(top_p)
+    # ic(output_file_discarded)
+    # ic(tls_insecure)
+    # ic(tls_client_cert)
+    # ic(tls_client_key)
+    # ic(tls_client_passwd)
+    # exit()
+
     batch_inputs = []
     for _ in range(request_batch_size):
         # only sampling from the seed tasks
@@ -327,7 +347,7 @@ def get_instructions_from_model(
         instruction_data += new_instructions
 
     post_process_duration = time.time() - post_process_start
-    logger.debug(
+    logger.info(
         f"Request {request_idx} took {request_duration:.2f}s, "
         f"post-processing took {post_process_duration:.2f}s"
     )
@@ -378,7 +398,7 @@ def generate_data(
         raise SystemExit(f"Error: taxonomy ({taxonomy}) does not exist.")
 
     seeds = len(seed_instruction_data)
-    logger.debug(f"Loaded {seeds} human-written seed instructions from {taxonomy}")
+    logger.info(f"Loaded {seeds} human-written seed instructions from {taxonomy}")
     if not seeds:
         raise SystemExit("Nothing to generate. Exiting.")
 
@@ -391,10 +411,15 @@ def generate_data(
 
         documents = seed_example["document"]
         if documents:
-            seed_example["document"] = chunk_document(
+            # seed_example["document"] = chunk_document(
+            #     documents=documents,
+            #     server_ctx_size=server_ctx_size,
+            #     chunk_word_count=chunk_word_count,
+            # )
+            seed_example["document"] = chunk_document_by_tokens(
                 documents=documents,
                 server_ctx_size=server_ctx_size,
-                chunk_word_count=chunk_word_count,
+                model_name=model_name,
             )
 
         if len(seed_example["input"]) > 0:
@@ -422,14 +447,14 @@ def generate_data(
     output_file_discarded = os.path.join(
         output_dir, f"discarded_{name}_{date_suffix}.log"
     )
-    logger.debug(f"Generating to: {os.path.join(output_dir, output_file)}")
+    logger.info(f"Generating to: {os.path.join(output_dir, output_file)}")
 
     request_idx = 0
     # load the LM-generated instructions
     machine_instruction_data = []
     if os.path.exists(os.path.join(output_dir, "regen.json")):
         machine_instruction_data = utils.jload(os.path.join(output_dir, "regen.json"))
-        logger.debug(
+        logger.info(
             f"Loaded {len(machine_instruction_data)} machine-generated instructions"
         )
 
@@ -446,7 +471,7 @@ def generate_data(
         d["instruction"] for d in machine_instruction_data
     ]
     all_instruction_tokens = [
-        scorer._tokenizer.tokenize(inst) for inst in all_instructions
+        tokenize(inst, model_name) for inst in all_instructions
     ]
 
     prompt_template = check_prompt_file(prompt_file_path, model_family)
@@ -496,9 +521,10 @@ def generate_data(
         assess_start = time.time()
         for instruction_data_entry in instruction_data:
             # computing similarity with the pre-tokenized instructions
-            new_instruction_tokens = scorer._tokenizer.tokenize(
-                instruction_data_entry["instruction"]
-            )
+            # new_instruction_tokens = scorer._tokenizer.tokenize(
+            #     instruction_data_entry["instruction"]
+            # )
+            new_instruction_tokens = tokenize(instruction_data_entry["instruction"], model_name)
             with mpctx.Pool(num_cpus) as pool:
                 rouge_scores = pool.map(
                     partial(rouge_scorer._score_lcs, new_instruction_tokens),
@@ -527,8 +553,8 @@ def generate_data(
                 )
         progress_bar.update(keep)
         assess_duration = time.time() - assess_start
-        logger.debug(f"Assessing generated samples took {assess_duration:.2f}s")
-        logger.debug(
+        logger.info(f"Assessing generated samples took {assess_duration:.2f}s")
+        logger.info(
             f"Generated {total} instructions(discarded {discarded}), rouged {total - keep}, kept {keep} instructions"
         )
         utils.jdump(machine_instruction_data, os.path.join(output_dir, output_file))
