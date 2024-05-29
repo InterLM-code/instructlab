@@ -89,6 +89,11 @@ def openai_completion(
             - an openai_object.OpenAIObject object (if return_text is False)
             - a list of objects of the above types (if decoding_args.n > 1)
     """
+    client = OpenAI(
+        api_key=api_key,
+        base_url=api_base
+    )
+    model_name = client.models.list().data[0].id
     is_single_prompt = isinstance(prompts, (str, dict))
     if is_single_prompt:
         prompts = [prompts]

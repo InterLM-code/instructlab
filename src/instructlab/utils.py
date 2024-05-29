@@ -200,6 +200,51 @@ def get_taxonomy_diff(repo="taxonomy", base="origin/main"):
     return updated_taxonomy_files
 
 
+def get_document(fpath: str) -> str:
+    """
+    Retrieve the content of a file.
+
+    Args:
+        fpath (str): File path.
+
+    Returns:
+        str: File content.
+    """
+    if not os.path.isfile(fpath):
+        raise SystemExit(f"File {fpath} does not exist.")
+    with open(fpath, "r") as f:
+        return f.read()
+
+
+def get_document_fpaths(
+    logger,
+    source: Dict[str, Union[str, List[str]]],
+    skip_checkout: bool = False,
+) -> List[str]:
+    """
+    Retrieve the content of files from a Git repository.
+
+    Args:
+        source (dict): Source info containing repository URL, commit hash, and list of file patterns.
+
+    Returns:
+         List[str]: List of document contents.
+    """
+    assert "root_path" in source, "root_path is required for file source."
+    root_path = source["root_path"]
+    if not os.path.isdir(root_path):
+        raise SystemExit(f"Directory {root_path} does not exist.")
+    file_patterns = source.get("patterns")
+    file_paths = [] 
+    for pattern in file_patterns:
+        for file_path in glob.glob(os.path.join(root_path, pattern)):
+            if os.path.isfile(file_path) and (file_path.endswith(".md") or file_path.endswith(".txt")):
+                file_paths.append(file_path)
+    if file_paths:
+        return file_paths
+    raise SystemExit("Couldn't find any files to process.")
+
+
 def get_documents(
     logger,
     source: Dict[str, Union[str, List[str]]],
@@ -213,7 +258,7 @@ def get_documents(
 
     Returns:
          List[str]: List of document contents.
-    """ ""
+    """
     if "root_path" in source:
         root_path = source["root_path"]
         if not os.path.isdir(root_path):
@@ -319,7 +364,7 @@ def tokenize(text: str, model_name: str, max_length: int=-1) -> List[str]:
     from transformers import AutoTokenizer
 
     # Initialize the tokenizer with a pretrained model
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)   # TODO
     # Tokenize the text
     tokens = tokenizer.encode(text, add_special_tokens=False, 
                               max_length=max_length if max_length > 0 else None,
@@ -553,26 +598,32 @@ def read_taxonomy_file(
 
         # get seed instruction data
         tax_path = "->".join(taxonomy_path.parent.parts)
+        # ic(tax_path)
         task_description = contents.get("task_description")
-        documents = contents.get("document")
+        documents = contents.get("documents")
+        # ic(documents)
         if documents:
-            documents = get_documents(source=documents, logger=logger)
-            logger.debug("Content from git repo fetched")
+            documents = get_document_fpaths(source=documents, logger=logger)
 
-        for seed_example in contents.get("seed_examples"):
-            question = seed_example.get("question")
-            answer = seed_example.get("answer")
-            context = seed_example.get("context", "")
-            seed_instruction_data.append(
-                {
-                    "instruction": question,
-                    "input": context,
-                    "output": answer,
-                    "taxonomy_path": tax_path,
-                    "task_description": task_description,
-                    "document": documents,
-                }
-            )
+        for seed_examples in contents.get("seed_examples"):
+            seed_instruction_data.append({
+                "examples": [],
+                "document": get_document(seed_examples.get("document")),
+                "documents": documents,
+                "taxonomy_path": tax_path,
+                "task_description": task_description,
+            })
+            for qa in seed_examples.get("examples"):
+                question = qa.get("question")
+                answer = qa.get("answer")
+                context = qa.get("context", "")
+                seed_instruction_data[-1]["examples"].append(
+                    {
+                        "instruction": question,
+                        "input": context,   # ommited for now
+                        "output": answer,
+                    }
+                )
     except Exception as e:
         errors += 1
         raise TaxonomyReadingException(f"Exception {e} raised in {file_path}") from e

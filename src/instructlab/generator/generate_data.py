@@ -83,7 +83,7 @@ Here are the requirements:
 {% if not document -%}
 List of 5 tasks:
 {% else -%}
-Based on below document provide a list of 5 tasks:
+An example document with questions and answers are provided below:
 Document:
 {{document}}
 Here are some examples to help you understand the type of questions that are asked for this document:
@@ -112,10 +112,9 @@ _WORD_DENYLIST = [
 ]
 
 
-def check_prompt_file(prompt_file_path, model_family):
+def check_prompt_file(prompt_file_path, model_family, language="en"):
     """Check for prompt file."""
     ic(prompt_file_path, model_family)
-    # exit()
     try:
         with open(prompt_file_path, encoding="utf=8") as file:
             prompt_template = file.read()
@@ -127,40 +126,50 @@ def check_prompt_file(prompt_file_path, model_family):
             prompt_template = DEFAULT_PROMPT_TEMPLATE_MERLINITE
         elif model_family == "mixtral":
             prompt_template = DEFAULT_PROMPT_TEMPLATE_MIXTRAL
+        elif model_family == "Qwen1.5":
+            if language == "en":    # TODO: update en template
+                pass    
+            elif language == "zh":  # TODO: add zh template
+                                    # TODO: read language argument from the taxonomy path
+                pass
+            prompt_template = DEFAULT_PROMPT_TEMPLATE_MIXTRAL
         else:
             raise ValueError(f"Unsupported family '{model_family}': {exc}") from exc
     prompt_template = prompt_template.strip() + "\n"
     return prompt_template
 
 
-def encode_prompt(prompt_instructions, prompt):
+def encode_prompt(prompt_instructions, prompt, documents_data_pool):
     """Encode multiple prompt instructions into a single string.
     If documents exist, randomly select one."""
     idx = 0
-    document = None
-    document_list = prompt_instructions[0].get("document")
+    prompt_instructions = prompt_instructions[0]
+    document = prompt_instructions.get("document")
+    # sample a document if it exists
+    target_document = documents_data_pool[random.choice(prompt_instructions["documents"])]
+      # TODO: adjust the position of document and add the target_document
+    ic(len(target_document))
 
-    if document_list:
-        document = random.choice(document_list)
-
-    prompt = Template(prompt).render(
-        taxonomy=prompt_instructions[0]["taxonomy_path"],
-        task_description=prompt_instructions[0]["task_description"],
+    prompt = Template(DEFAULT_PROMPT_TEMPLATE_MIXTRAL).render(  # TODO: DEFAULT_PROMPT_TEMPLATE_MIXTRAL should be the variable `prompt`, but it's buggy here
+        taxonomy=prompt_instructions["taxonomy_path"],
+        task_description=prompt_instructions["task_description"],
         document=document,
+        target_document=target_document,    # TODO
     )
 
     # pylint: disable=unused-variable
-    for idx, task_dict in enumerate(prompt_instructions):
+    ic(len(prompt_instructions["examples"]))
+    for idx, task_dict in enumerate(prompt_instructions["examples"]):
         (
             instruction,
             prompt_input,
             prompt_output,
             taxonomy_path,
         ) = (
-            task_dict["instruction"],
-            task_dict["input"],
-            task_dict["output"],
-            task_dict["taxonomy_path"],
+            task_dict["instruction"],   # our input
+            task_dict["input"],         # context: table etc
+            task_dict["output"],        # our output
+            prompt_instructions["taxonomy_path"],
         )
         instruction = re.sub(r"\s+", " ", instruction).strip().rstrip(":")
         prompt_input = "<noinput>" if prompt_input.lower() == "" else prompt_input
@@ -168,7 +177,10 @@ def encode_prompt(prompt_instructions, prompt):
         prompt += f"** Instruction\n{instruction}\n"
         prompt += f"** Input\n{prompt_input}\n"
         prompt += f"** Output\n{prompt_output}\n"
-    prompt += f"* Task {idx + 2}\n"
+
+    prompt += "\n\nNow please create 5 tasks based on the following document:\n"
+    prompt += f"Target Document:\n{target_document}\n"
+
     return prompt
 
 
@@ -262,6 +274,7 @@ def get_instructions_from_model(
     logger,
     request_idx,
     instruction_data_pool,
+    documents_data_pool,    # pass the documents_data_pool
     prompt_template,
     api_base,
     api_key,
@@ -276,27 +289,13 @@ def get_instructions_from_model(
     tls_client_key,
     tls_client_passwd,
 ):
-    # ic(request_idx)
-    # ic(instruction_data_pool)
-    # ic(prompt_template)
-    # ic(api_base)
-    # ic(api_key)
-    # ic(model_name)
-    # ic(num_prompt_instructions)
-    # ic(request_batch_size)
-    # ic(temperature)
-    # ic(top_p)
-    # ic(output_file_discarded)
-    # ic(tls_insecure)
-    # ic(tls_client_cert)
-    # ic(tls_client_key)
-    # ic(tls_client_passwd)
-    # exit()
 
     batch_inputs = []
     for _ in range(request_batch_size):
-        # only sampling from the seed tasks
         try:
+            # sample num_prompt_instructions seed examples from instruction_data_pool
+            # note that num_prompt_instructions should not be greater than the number of examples in the pool
+            assert num_prompt_instructions <= len(instruction_data_pool)
             prompt_instructions = random.sample(
                 instruction_data_pool, num_prompt_instructions
             )
@@ -306,7 +305,7 @@ def get_instructions_from_model(
                 f"yaml is formatted correctly, and there is enough "
                 f"new data({num_prompt_instructions}+ Q&A))"
             ) from exc
-        prompt = encode_prompt(prompt_instructions, prompt_template)
+        prompt = encode_prompt(prompt_instructions, prompt_template, documents_data_pool)
         batch_inputs.append(prompt)
     decoding_args = utils.OpenAIDecodingArguments(
         temperature=temperature,
@@ -315,7 +314,7 @@ def get_instructions_from_model(
         # Requests will be automatically adjusted.
         max_tokens=3072,
         top_p=top_p,
-        stop=["* Task 5"],
+        # stop=["* Task 5"],
     )
     request_start = time.time()
     results = utils.openai_completion(
@@ -368,7 +367,7 @@ def generate_data(
     model_name: Optional[str] = None,
     num_cpus: Optional[int] = None,
     num_instructions_to_generate: Optional[int] = None,
-    num_prompt_instructions=2,
+    num_prompt_instructions=1,
     request_batch_size=5,
     temperature=1.0,
     top_p=1.0,
@@ -398,48 +397,45 @@ def generate_data(
         raise SystemExit(f"Error: taxonomy ({taxonomy}) does not exist.")
 
     seeds = len(seed_instruction_data)
-    logger.info(f"Loaded {seeds} human-written seed instructions from {taxonomy}")
+    logger.info(f"Loaded {seeds} taxonomies with human-written seed instructions from {taxonomy}")
     if not seeds:
         raise SystemExit("Nothing to generate. Exiting.")
 
     def unescape(s):
         return bytes(s, "utf-8").decode("utf-8")
 
-    test_data = []
-    for seed_example in seed_instruction_data:
-        user = seed_example["instruction"]
+    documents_instruction_data_pool = dict()  # documents_instruction_data_pool is a dictionary of document paths and generated instructions for deduplication {fpath: instructions}
+    documents_data_pool = dict()    # documents_data_pool is a dictionary of document paths and their chunked content {fpath: chunk}
 
-        documents = seed_example["document"]
-        if documents:
-            # seed_example["document"] = chunk_document(
-            #     documents=documents,
-            #     server_ctx_size=server_ctx_size,
-            #     chunk_word_count=chunk_word_count,
-            # )
-            seed_example["document"] = chunk_document_by_tokens(
-                documents=documents,
-                server_ctx_size=server_ctx_size,
-                model_name=model_name,
-            )
+    for seed_examples in seed_instruction_data: # all seed examples have been put in a single list
+        # chunk the document
+        seed_examples["document"] = chunk_document_by_tokens(
+            documents=[seed_examples["document"]],
+            server_ctx_size=server_ctx_size,
+            model_name=model_name,
+        )[0]
+        assert type(seed_examples["document"]) == str
+        ic(seed_examples["documents"])
 
-        if len(seed_example["input"]) > 0:
-            user += "\n" + seed_example["input"]
-        try:
-            test_data.append(
-                {
-                    "system": utils.get_sysprompt(),
-                    "user": unescape(user),
-                    "assistant": unescape(seed_example["output"]),
-                }
-            )
-        except TypeError as exc:
-            click.secho(
-                f"Error reading seed examples: {exc}. Please make sure your answers are verbose enough.",
-                fg="red",
-            )
-            raise click.exceptions.Exit(1)
+        # chunk the documents and save them in the pool
+        assert "documents" in seed_examples, "Seed example must have documents"
+        for fpath in seed_examples["documents"]:
+            if fpath not in documents_data_pool:
+                with open(fpath, "r") as f:
+                    content = f.read()
+                    documents_data_pool[fpath] = chunk_document_by_tokens(
+                        documents=[content],
+                        server_ctx_size=server_ctx_size,
+                        model_name=model_name,
+                    )[0]
+            if fpath not in instruction_data_pool:
+                instruction_data_pool[fpath] = []
+    
+    for fpath, content in documents_data_pool.items():
+        ic(fpath, len(content))
 
     name = Path(model_name).stem  # Just in case it is a file path
+                                    # TODO: pass a model path on cpfs
     date_suffix = datetime.now().replace(microsecond=0).isoformat().replace(":", "_")
     output_file = f"generated_{name}_{date_suffix}.json"
     output_file_train = f"train_{name}_{date_suffix}.jsonl"
@@ -450,7 +446,9 @@ def generate_data(
     logger.info(f"Generating to: {os.path.join(output_dir, output_file)}")
 
     request_idx = 0
-    # load the LM-generated instructions
+
+    # TODO: load exisitng machine-generated instructions
+    # load the LM-generated instructions 
     machine_instruction_data = []
     if os.path.exists(os.path.join(output_dir, "regen.json")):
         machine_instruction_data = utils.jload(os.path.join(output_dir, "regen.json"))
@@ -458,23 +456,25 @@ def generate_data(
             f"Loaded {len(machine_instruction_data)} machine-generated instructions"
         )
 
-    # similarities = {}
-    scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=False)
+    # TODO: load output file if exits 
+
+    scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=False)    # TODO: rouge scorer
 
     # now let's generate new instructions!
     progress_bar = tqdm.tqdm(total=num_instructions_to_generate)
     if machine_instruction_data:
         progress_bar.update(len(machine_instruction_data))
 
-    # first we tokenize all the seed instructions and generated machine instructions
-    all_instructions = [d["instruction"] for d in seed_instruction_data] + [
-        d["instruction"] for d in machine_instruction_data
-    ]
-    all_instruction_tokens = [
-        tokenize(inst, model_name) for inst in all_instructions
-    ]
+    # # first we tokenize all the seed instructions and generated machine instructions
+    # all_instructions = [d["instruction"] for d in seed_instruction_data] + [
+    #     d["instruction"] for d in machine_instruction_data
+    # ]
+    # all_instruction_tokens = [
+    #     tokenize(inst, model_name) for inst in all_instructions
+    # ]
 
-    prompt_template = check_prompt_file(prompt_file_path, model_family)
+    # load the prompt template
+    prompt_template = check_prompt_file(prompt_file_path, model_family, language="en")
     if console_output:
         print(
             "Synthesizing new instructions. If you aren't satisfied with the generated instructions, interrupt training (Ctrl-C) and try adjusting your YAML files. Adding more examples may help."
@@ -485,22 +485,25 @@ def generate_data(
     all_taxonomy_paths = list(set(e["taxonomy_path"] for e in seed_instruction_data))
     total_discarded = 0
     total_rouged = 0
+    ic(all_taxonomy_paths)
     while len(machine_instruction_data) < num_instructions_to_generate:
         request_idx += 1
 
-        # Pick taxonomy path
+        # pick taxonomy path
         selected_taxonomy = all_taxonomy_paths[request_idx % len(all_taxonomy_paths)]
         logger.info(f"Selected taxonomy path {selected_taxonomy}")
-        # Filter the pool
+        # filter the pool to get the seed examples for the selected taxonomy
         instruction_data_pool = [
             e
             for e in seed_instruction_data + machine_instruction_data
             if e["taxonomy_path"] == selected_taxonomy
         ]
+        ic(len(instruction_data_pool))
         instruction_data, discarded = get_instructions_from_model(
             logger,
             request_idx,
             instruction_data_pool,
+            documents_data_pool,
             prompt_template,
             api_base,
             api_key,
@@ -578,12 +581,12 @@ def generate_data(
                 json.dump(entry, outfile, ensure_ascii=False)
                 outfile.write("\n")
         # utils.jdump(test_data, os.path.join(output_dir, output_file_test))
-        with open(
-            os.path.join(output_dir, output_file_test), "w", encoding="utf-8"
-        ) as outfile:
-            for entry in test_data:
-                json.dump(entry, outfile, ensure_ascii=False)
-                outfile.write("\n")
+        # with open(
+        #     os.path.join(output_dir, output_file_test), "w", encoding="utf-8"
+        # ) as outfile:
+        #     for entry in test_data:
+        #         json.dump(entry, outfile, ensure_ascii=False)
+        #         outfile.write("\n")
 
     progress_bar.close()
 
